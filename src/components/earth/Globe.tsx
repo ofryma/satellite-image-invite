@@ -1,81 +1,46 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Globe from "react-globe.gl";
 import { GlobeMethods } from "react-globe.gl";
 import { TextureLoader, ShaderMaterial, Vector2 } from 'three';
-import * as solar from 'solar-calculator';
+import * as satellite from 'satellite.js';
+
+import { dayNightShader } from './dayNightShader';
+import { sunPosAt} from './utils';
+
+// Define types for satellite data
+interface SatelliteData {
+    satrec: any;
+    name: string;
+    lat?: number;
+    lng?: number;
+    alt?: number;
+    futurePoint?: boolean;
+    color?: string;
+}
 
 const VELOCITY = 0.1; // minutes per frame
-// Custom shader:  Blends night and day images to simulate day/night cycle
-const dayNightShader = {
-    vertexShader: `
-      varying vec3 vNormal;
-      varying vec2 vUv;
-      void main() {
-        vNormal = normalize(normalMatrix * normal);
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: `
-      #define PI 3.141592653589793
-      uniform sampler2D dayTexture;
-      uniform sampler2D nightTexture;
-      uniform vec2 sunPosition;
-      uniform vec2 globeRotation;
-      varying vec3 vNormal;
-      varying vec2 vUv;
-
-      float toRad(in float a) {
-        return a * PI / 180.0;
-      }
-
-      vec3 Polar2Cartesian(in vec2 c) { // [lng, lat]
-        float theta = toRad(90.0 - c.x);
-        float phi = toRad(90.0 - c.y);
-        return vec3( // x,y,z
-          sin(phi) * cos(theta),
-          cos(phi),
-          sin(phi) * sin(theta)
-        );
-      }
-
-      void main() {
-        float invLon = toRad(globeRotation.x);
-        float invLat = -toRad(globeRotation.y);
-        mat3 rotX = mat3(
-          1, 0, 0,
-          0, cos(invLat), -sin(invLat),
-          0, sin(invLat), cos(invLat)
-        );
-        mat3 rotY = mat3(
-          cos(invLon), 0, sin(invLon),
-          0, 1, 0,
-          -sin(invLon), 0, cos(invLon)
-        );
-        vec3 rotatedSunDirection = rotX * rotY * Polar2Cartesian(sunPosition);
-        float intensity = dot(normalize(vNormal), normalize(rotatedSunDirection));
-        vec4 dayColor = texture2D(dayTexture, vUv);
-        vec4 nightColor = texture2D(nightTexture, vUv);
-        float blendFactor = smoothstep(-0.1, 0.1, intensity);
-        gl_FragColor = mix(nightColor, dayColor, blendFactor);
-      }
-    `
-};
-
-const sunPosAt = (dt: number): [number, number] => {
-    const day = new Date(+dt).setUTCHours(0, 0, 0, 0);
-    const t = solar.century(dt);
-    const longitude = (day - dt) / 864e5 * 360 - 180;
-    return [longitude - solar.equationOfTime(t) / 4, solar.declination(t)];
-};
+const EARTH_RADIUS_KM = 6371; // km
+const TIME_STEP = 3 * 1000; // per frame
 
 const EarthSimulator = () => {
     const globeRef = useRef<GlobeMethods | undefined>(undefined);
+
+    // Animation
     const [rotation, setRotation] = useState<boolean>(false);
     const [rotationSpeed, setRotationSpeed] = useState<number>(0.2);
-    const [dt, setDt] = useState<number>(+new Date());
     const [globeMaterial, setGlobeMaterial] = useState<ShaderMaterial | undefined>();
+    const [particleSize, setParticleSize] = useState<number>(1);
+
+    // Reference time
+    const [dt, setDt] = useState<number>(+new Date());
     const [desiredDt, setDesiredDt] = useState<number>(+new Date());
+
+    // Satellite data
+    const [satData, setSatData] = useState<SatelliteData[]>([]);
+    const [globeRadius, setGlobeRadius] = useState<number>(0);
+    const [time, setTime] = useState(new Date());
+    const [filteredSatellites, setFilteredSatellites] = useState<string[]>([]);
+    const [selectedSatellites, setSelectedSatellites] = useState<Set<string>>(new Set());
 
     useEffect(() => {
         if (globeRef.current) {
@@ -149,12 +114,83 @@ const EarthSimulator = () => {
         };
     }, [desiredDt]);
 
+
+    useEffect(() => {
+        // load satellite data
+        fetch('//cdn.jsdelivr.net/npm/globe.gl/example/datasets/space-track-leo.txt').then(r => r.text()).then(rawData => {
+            const tleData = rawData.replace(/\r/g, '')
+                .split(/\n(?=[^12])/)
+                .filter(d => d)
+                .map(tle => tle.split('\n'));
+                
+            const satData = tleData.map(([name, ...tle]) => ({
+                satrec: satellite.twoline2satrec(tle[0], tle[1]),
+                name: name.trim().replace(/^0 /, ''),
+                color: `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`
+            }))
+                // exclude those that can't be propagated
+                .filter(d => !!satellite.propagate(d.satrec, new Date())?.position);
+
+            setSatData(satData);
+        });
+    }, []);
+
     const handleTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const newDate = new Date(e.target.value);
         const newTime = newDate.getTime();
         // Update the actual dt state
         setDesiredDt(newTime);
     };
+
+    const handleSatelliteSelect = (name: string) => {
+        setSelectedSatellites(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(name)) {
+                newSet.delete(name);
+            } else {
+                newSet.add(name);
+            }
+            return newSet;
+        });
+    };
+
+    const handleSelectAll = () => {
+        setSelectedSatellites(new Set(filteredSatellites));
+    };
+
+    const handleDeselectAll = () => {
+        setSelectedSatellites(new Set());
+    };
+
+    const particlesData = useMemo(() => {
+        if (!satData.length) return [];
+
+        // Update satellite positions
+        const gmst = satellite.gstime(new Date(dt));
+        return [
+            satData
+                .filter((d: SatelliteData) => selectedSatellites.has(d.name))
+                .map((d: SatelliteData) => {
+                    const eci = satellite.propagate(d.satrec, new Date(dt));
+                    if (eci?.position) {
+                        const gdPos = satellite.eciToGeodetic(eci.position, gmst);
+                        const lat = satellite.radiansToDegrees(gdPos.latitude);
+                        const lng = satellite.radiansToDegrees(gdPos.longitude);
+                        const alt = gdPos.height / EARTH_RADIUS_KM;
+                        const color = d.color;
+                        return { ...d, lat, lng, alt, color };
+                    }
+                    return d;
+                }).filter((d: SatelliteData) => !isNaN(d.lat!) && !isNaN(d.lng!) && !isNaN(d.alt!))
+        ];
+    }, [satData, dt, selectedSatellites]);
+
+    useEffect(() => {
+        if (globeRef.current) {
+            setGlobeRadius(globeRef.current.getGlobeRadius());
+            globeRef.current.pointOfView({ altitude: 3.5 });
+        }
+    }, []);
 
     return (
         <div style={{ width: '100vw', height: '100vh' }}>
@@ -166,22 +202,138 @@ const EarthSimulator = () => {
                 globeMaterial={globeMaterial}
                 width={window.innerWidth}
                 height={window.innerHeight}
-                onZoom={useCallback(({ lng, lat }: { lng: number; lat: number }) => 
-                    globeMaterial?.uniforms.globeRotation.value.set(lng, lat), 
+                onZoom={useCallback(({ lng, lat }: { lng: number; lat: number }) =>
+                    globeMaterial?.uniforms.globeRotation.value.set(lng, lat),
                     [globeMaterial])}
+                particlesData={particlesData}
+                particleLabel="name"
+                particleLat="lat"
+                particleLng="lng"
+                particleAltitude="alt"
+                particlesColor={useCallback((d: any) => (d as SatelliteData).color || 'palegreen', [])}
+                particlesSize={particleSize}
             />
 
-            <div style={{ flexDirection: 'column', position: 'absolute', top: 0, left: 0, width: '300px', height: '150px', display: 'flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.5)', borderRadius: '5px', zIndex: 1000 }}>
+            <div style={{flexDirection: 'column', position: 'absolute', top: 0, left: 0, width: '300px', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.5)', borderRadius: '5px', zIndex: 1000 }}>
                 <button onClick={() => setRotation(!rotation)}>
                     {rotation ? 'Stop' : 'Start'}
                 </button>
                 <input type="range" min="0" max="0.7" step={0.01} value={rotationSpeed} onChange={(e) => setRotationSpeed(Number(e.target.value))} />
-                <input 
-                    type="datetime-local" 
-                    value={new Date(dt).toISOString().slice(0, 16)} 
+                <input
+                    type="datetime-local"
+                    value={new Date(dt).toISOString().slice(0, 16)}
                     onChange={handleTimeChange}
                     style={{ margin: '10px 0' }}
                 />
+                <div style={{ display: 'flex', alignItems: 'center', margin: '10px 0' }}>
+                    <label style={{ marginRight: '10px' }}>Satellite Size:</label>
+                    <input
+                        type="range"
+                        min="0.5"
+                        max="5"
+                        step="0.1"
+                        value={particleSize}
+                        onChange={(e) => setParticleSize(Number(e.target.value))}
+                        style={{ width: '100px' }}
+                    />
+                </div>
+                <div style={{ position: 'relative', width: '200px' }}>
+                    <input
+                        type="text"
+                        placeholder="Search satellites..."
+                        style={{
+                            width: '100%',
+                            padding: '5px',
+                            margin: '10px 0',
+                            borderRadius: '4px',
+                            border: '1px solid #ccc'
+                        }}
+                        onChange={(e) => {
+                            const searchTerm = e.target.value.toLowerCase();
+                            const filteredSatellites = Array.from(new Set(satData.map(sat => sat.name)))
+                                .filter(name => name.toLowerCase().includes(searchTerm));
+                            setFilteredSatellites(filteredSatellites);
+                        }}
+                    />
+                    <div style={{
+                        position: 'absolute',
+                        top: '100%',
+                        left: 0,
+                        right: 0,
+                        maxHeight: '200px',
+                        overflowY: 'auto',
+                        backgroundColor: 'white',
+                        border: '1px solid #ccc',
+                        borderRadius: '4px',
+                        zIndex: 1000
+                    }}>
+                        <div style={{
+                            padding: '5px',
+                            borderBottom: '1px solid #ccc',
+                            display: 'flex',
+                            justifyContent: 'space-between'
+                        }}>
+                            <button
+                                onClick={handleSelectAll}
+                                style={{
+                                    padding: '2px 5px',
+                                    margin: '0 2px',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                Select All
+                            </button>
+                            <button
+                                onClick={handleDeselectAll}
+                                style={{
+                                    padding: '2px 5px',
+                                    margin: '0 2px',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                Deselect All
+                            </button>
+                        </div>
+                        {filteredSatellites.map((name, index) => (
+                            <div
+                                key={index}
+                                style={{
+                                    padding: '5px',
+                                    cursor: 'pointer',
+                                    backgroundColor: selectedSatellites.has(name) ? '#e0e0e0' : 'white',
+                                    display: 'flex',
+                                    alignItems: 'center'
+                                }}
+                                onMouseOver={(e) => {
+                                    e.currentTarget.style.backgroundColor = selectedSatellites.has(name) ? '#d0d0d0' : '#f0f0f0';
+                                }}
+                                onMouseOut={(e) => {
+                                    e.currentTarget.style.backgroundColor = selectedSatellites.has(name) ? '#e0e0e0' : 'white';
+                                }}
+                                onClick={() => handleSatelliteSelect(name)}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={selectedSatellites.has(name)}
+                                    onChange={() => {}}
+                                    style={{ marginRight: '5px' }}
+                                />
+                                {name}
+                            </div>
+                        ))}
+                    </div>
+                    {selectedSatellites.size > 0 && (
+                        <div style={{
+                            marginTop: '5px',
+                            padding: '5px',
+                            backgroundColor: '#f8f8f8',
+                            borderRadius: '4px',
+                            fontSize: '0.9em'
+                        }}>
+                            Selected: {selectedSatellites.size} satellite{selectedSatellites.size !== 1 ? 's' : ''}
+                        </div>
+                    )}
+                </div>
             </div>
         </div>
     );
