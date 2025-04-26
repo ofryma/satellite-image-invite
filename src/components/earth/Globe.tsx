@@ -30,6 +30,7 @@ const EarthSimulator = () => {
     const [rotationSpeed, setRotationSpeed] = useState<number>(0.2);
     const [globeMaterial, setGlobeMaterial] = useState<ShaderMaterial | undefined>();
     const [particleSize, setParticleSize] = useState<number>(1);
+    const [isRealTime, setIsRealTime] = useState<boolean>(false);
 
     // Reference time
     const [dt, setDt] = useState<number>(+new Date());
@@ -78,6 +79,13 @@ const EarthSimulator = () => {
         let startDt: number;
 
         const animate = (currentTime: number) => {
+            if (isRealTime) {
+                // Update to current time when in real-time mode
+                setDt(+new Date());
+                animationFrameId = requestAnimationFrame(animate);
+                return;
+            }
+
             if (!startTime) {
                 startTime = currentTime;
                 startDt = dt;
@@ -100,8 +108,8 @@ const EarthSimulator = () => {
             }
         };
 
-        // Only start animation if there's a significant difference
-        if (Math.abs(desiredDt - dt) > 1000) {
+        // Only start animation if there's a significant difference or in real-time mode
+        if (isRealTime || Math.abs(desiredDt - dt) > 1000) {
             animationFrameId = requestAnimationFrame(animate);
         } else {
             setDt(desiredDt);
@@ -112,7 +120,7 @@ const EarthSimulator = () => {
                 cancelAnimationFrame(animationFrameId);
             }
         };
-    }, [desiredDt]);
+    }, [desiredDt, isRealTime]);
 
 
     useEffect(() => {
@@ -218,12 +226,27 @@ const EarthSimulator = () => {
                 <button onClick={() => setRotation(!rotation)}>
                     {rotation ? 'Stop' : 'Start'}
                 </button>
+                <button 
+                    onClick={() => setIsRealTime(!isRealTime)}
+                    style={{
+                        backgroundColor: isRealTime ? '#4CAF50' : '#f44336',
+                        color: 'white',
+                        padding: '8px 16px',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        margin: '10px 0'
+                    }}
+                >
+                    {isRealTime ? 'Real-time Mode: ON' : 'Real-time Mode: OFF'}
+                </button>
                 <input type="range" min="0" max="0.7" step={0.01} value={rotationSpeed} onChange={(e) => setRotationSpeed(Number(e.target.value))} />
                 <input
                     type="datetime-local"
                     value={new Date(dt).toISOString().slice(0, 16)}
                     onChange={handleTimeChange}
                     style={{ margin: '10px 0' }}
+                    disabled={isRealTime}
                 />
                 <div style={{ display: 'flex', alignItems: 'center', margin: '10px 0' }}>
                     <label style={{ marginRight: '10px' }}>Satellite Size:</label>
