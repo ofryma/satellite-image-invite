@@ -1,13 +1,14 @@
-import React, { useRef, useEffect } from 'react';
-
+import React from 'react';
 import './App.css';
-import EarthSimulator from './components/earth/Globe';
+import SphereScene from './components/system/SphereScene';
+import Globe from './components/earth/Globe';
+
 
 function App() {
-
   return (
     <div className="App">
-      <EarthSimulator />
+      {/* <Globe/> */}
+      <SphereScene />
     </div>
   );
 }
